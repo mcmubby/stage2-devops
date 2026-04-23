@@ -31,7 +31,7 @@ jobs:
       - name: Lint JavaScript (eslint)
         run: |
           cd frontend
-          npm install eslint eslint/js --no-save
+          npm install eslint eslint/js globals --no-save
           npx eslint app.js
 
       - name: Lint Dockerfiles (hadolint)
