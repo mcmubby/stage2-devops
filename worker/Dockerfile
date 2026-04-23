@@ -12,9 +12,7 @@ COPY . .
 RUN apt-get update && apt-get install -y procps && rm -rf /var/lib/apt/lists/*
 RUN useradd -m appuser && chown -R appuser:appuser /app
 USER appuser
-# Worker doesn't have an HTTP server to check.
-# We check if the python process is running, or we can ping redis if we install redis-cli.
-# A simple process check will do for now.
+
 HEALTHCHECK --interval=30s --timeout=30s --start-period=5s --retries=3 \
   CMD ps aux | grep "python worker.py" | grep -v grep
 CMD ["python", "worker.py"]

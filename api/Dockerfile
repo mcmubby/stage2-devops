@@ -7,7 +7,7 @@ FROM python:3.9-slim
 WORKDIR /app
 COPY --from=builder /app/wheels /wheels
 COPY --from=builder /app/requirements.txt .
-RUN pip install --no-cache /wheels/*
+RUN pip install --no-cache-dir /wheels/*
 COPY . .
 RUN useradd -m appuser && chown -R appuser:appuser /app
 USER appuser
