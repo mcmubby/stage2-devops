@@ -1,0 +1,228 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  lint:
+    name: Lint Code
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.9'
+
+      - name: Lint Python (flake8)
+        run: |
+          pip install flake8
+          flake8 api/ worker/ --count --select=E9,F63,F7,F82 --show-source --statistics
+
+      - name: Setup Node
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+
+      - name: Lint JavaScript (eslint)
+        run: |
+          cd frontend
+          npm install eslint --no-save
+          npx eslint app.js
+
+      - name: Lint Dockerfiles (hadolint)
+        run: |
+          docker run --rm -i hadolint/hadolint < frontend/Dockerfile
+          docker run --rm -i hadolint/hadolint < api/Dockerfile
+          docker run --rm -i hadolint/hadolint < worker/Dockerfile
+
+  test:
+    name: Unit Tests
+    needs: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.9'
+
+      - name: Install dependencies
+        run: |
+          cd api
+          pip install -r requirements.txt
+          pip install -r requirements-test.txt
+
+      - name: Run Pytest
+        run: |
+          cd api
+          pytest --cov=main tests/ --cov-report=xml
+
+      - name: Upload Coverage
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: api/coverage.xml
+
+  build:
+    name: Build Images
+    needs: test
+    runs-on: ubuntu-latest
+    services:
+      registry:
+        image: registry:2
+        ports:
+          - 5000:5000
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build frontend
+        run: |
+          docker build -t localhost:5000/frontend:${{ github.sha }} frontend/
+          docker tag localhost:5000/frontend:${{ github.sha }} localhost:5000/frontend:latest
+          docker push localhost:5000/frontend:${{ github.sha }}
+          docker push localhost:5000/frontend:latest
+
+      - name: Build api
+        run: |
+          docker build -t localhost:5000/api:${{ github.sha }} api/
+          docker tag localhost:5000/api:${{ github.sha }} localhost:5000/api:latest
+          docker push localhost:5000/api:${{ github.sha }}
+          docker push localhost:5000/api:latest
+
+      - name: Build worker
+        run: |
+          docker build -t localhost:5000/worker:${{ github.sha }} worker/
+          docker tag localhost:5000/worker:${{ github.sha }} localhost:5000/worker:latest
+          docker push localhost:5000/worker:${{ github.sha }}
+          docker push localhost:5000/worker:latest
+
+  security_scan:
+    name: Security Scan
+    needs: build
+    runs-on: ubuntu-latest
+    services: {}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build local images for scan
+        run: |
+          docker build -t frontend:${{ github.sha }} frontend/
+          docker build -t api:${{ github.sha }} api/
+          docker build -t worker:${{ github.sha }} worker/
+
+      - name: Trivy Vulnerability Scanner (frontend)
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: 'frontend:${{ github.sha }}'
+          format: 'sarif'
+          output: 'trivy-frontend.sarif'
+          severity: 'CRITICAL'
+
+      - name: Trivy Vulnerability Scanner (api)
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: 'api:${{ github.sha }}'
+          format: 'sarif'
+          output: 'trivy-api.sarif'
+          severity: 'CRITICAL'
+          exit-code: '1'
+
+      - name: Trivy Vulnerability Scanner (worker)
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: 'worker:${{ github.sha }}'
+          format: 'sarif'
+          output: 'trivy-worker.sarif'
+          severity: 'CRITICAL'
+
+      - name: Upload Trivy scan results
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-results
+          path: '*.sarif'
+
+  integration_test:
+    name: Integration Test
+    needs: security_scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup environment
+        run: cp .env.example .env
+
+      - name: Bring up stack
+        run: docker compose up -d --build
+
+      - name: Wait for services to be healthy
+        run: |
+          timeout 60s bash -c 'until [ "$(docker ps -q -f health=healthy | wc -l)" -ge 4 ]; do sleep 2; done'
+          docker compose ps
+
+      - name: Run Integration Test
+        run: |
+          # Submit job
+          JOB_ID=$(curl -s -X POST http://localhost:3000/submit | jq -r .job_id)
+          echo "Submitted Job: $JOB_ID"
+          
+          # Poll until completed
+          for i in {1..10}; do
+            STATUS=$(curl -s http://localhost:3000/status/$JOB_ID | jq -r .status)
+            echo "Status: $STATUS"
+            if [ "$STATUS" = "completed" ]; then
+              echo "Integration test passed."
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "Integration test failed. Job did not complete."
+          docker compose logs
+          exit 1
+
+      - name: Teardown stack
+        if: always()
+        run: docker compose down -v
+
+  deploy:
+    name: Deploy
+    needs: integration_test
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup environment
+        run: cp .env.example .env
+
+      - name: Initial startup
+        run: docker compose up -d --build
+
+      - name: Scripted Rolling Update
+        run: |
+          # Rebuild images just in case (to simulate a new image coming in)
+          docker compose build
+          
+          # We simulate deploying one service at a time. Let's do api.
+          # Scale api to 2
+          docker compose up -d --scale api=2 --no-recreate api
+          
+          # Wait for new container to be healthy
+          timeout 60s bash -c 'while [ "$(docker inspect --format="{{if .Config.Healthcheck}}{{print .State.Health.Status}}{{end}}" $(docker compose ps -q api | tail -n 1))" != "healthy" ]; do sleep 2; done' || { echo "New container not healthy"; exit 1; }
+          
+          # Stop old container
+          OLD_API=$(docker compose ps -q api | head -n 1)
+          docker stop $OLD_API
+          docker rm $OLD_API
+          
+          # Scale back to 1
+          docker compose up -d --scale api=1 --no-recreate api
+
+      - name: Teardown deployment simulation
+        if: always()
+        run: docker compose down -v
