@@ -11,3 +11,8 @@ Here is the list of bugs found and fixed in the source code to make it productio
    - **Line:** 8
    - **Problem:** Redis connection parameters (`host="localhost", port=6379`) were hardcoded. In a containerized setup, the API container cannot access Redis at `localhost`, and there was no provision for a password, which is a security best practice and required by the provided `.env`.
    - **Fix:** Updated the code to read `REDIS_HOST`, `REDIS_PORT`, and `REDIS_PASSWORD` from environment variables, passing them securely to the `redis.Redis()` instantiation.
+
+3. **File:** `worker/worker.py`
+   - **Line:** 6
+   - **Problem:** Like the API, Redis connection parameters were hardcoded to `localhost` and `6379`, and there was no way to pass a password.
+   - **Fix:** Updated to read `REDIS_HOST`, `REDIS_PORT`, and `REDIS_PASSWORD` from environment variables, passing them to the `redis.Redis()` instantiation.
