@@ -6,7 +6,7 @@ RUN pip install --no-cache-dir wheel==0.41.3 \
 
 FROM python:3.9-slim
 WORKDIR /app
-RUN apt-get update && apt-get install -y --no-install-recommends procps=2:3.3.17-6 \
+RUN apt-get update && apt-get install -y --no-install-recommends procps \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /app/wheels /wheels
 COPY --from=builder /app/requirements.txt .
